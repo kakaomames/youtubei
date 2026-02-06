@@ -1,0 +1,8 @@
+{
+  "name": "gemipro-api",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "youtubei.js": "latest"
+  }
+}
