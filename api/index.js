@@ -1,11 +1,11 @@
 import { Innertube, UniversalCache } from 'youtubei.js';
 
 export default async function handler(req, res) {
-    const { videoId } = req.query;
-    console.log(`videoId: ${videoId}`);
+    const { videoId, res: resMode, type } = req.query;
+    console.log(`videoId: ${videoId}, type: ${type}`); // パラメータをプリント！
 
     if (!videoId) {
-        res.status(400).json({ error: "videoIdパラメータが足りないよ！" });
+        res.status(400).json({ error: "videoIdが足りないよ！" });
         return;
     }
 
@@ -15,53 +15,63 @@ export default async function handler(req, res) {
             generate_session_locally: true
         });
 
-        let info = null;
-        // 試行するデバイスの優先順位リスト
-        const clients = ['ANDROID', 'TV', 'IOS', 'WEB'];
+        // 1. クライアントの優先順位を決定
+        const typeMap = {
+            'A': 'ANDROID',
+            'I': 'IOS',
+            'W': 'WEB',
+            'T': 'TV'
+        };
+
+        let clients = ['ANDROID', 'IOS', 'TV', 'WEB']; // デフォルトの順番
         
+        // もし type が指定されていたら、その機種を先頭に持ってくる
+        if (type && typeMap[type.toUpperCase()]) {
+            const selected = typeMap[type.toUpperCase()];
+            clients = [selected, ...clients.filter(c => c !== selected)];
+            console.log(`ACTION: 指定された ${selected} を最優先でトライします！`);
+        }
+
+        let info = null;
+        let lastError = null;
+
+        // 2. 順番に試行
         for (const client of clients) {
-            console.log(`SYSTEM: ${client} クライアントで試行中...`);
             try {
                 const tempInfo = await yt.getInfo(videoId, client);
-                if (tempInfo.streaming_data) {
-                    info = tempInfo; // 成功したらこれを使う！
-                    console.log(`SUCCESS: ${client} でストリーミングデータを発見！`);
-                    break; 
+                // ストリーミングデータがある、または res=j モードなら成功とみなす
+                if (tempInfo.streaming_data || resMode === 'j') {
+                    info = tempInfo;
+                    console.log(`SUCCESS: ${client} でデータ確保！`);
+                    break;
                 }
             } catch (err) {
-                console.log(`WARNING: ${client} での取得に失敗: ${err.message}`);
+                lastError = err.message;
+                console.log(`WARNING: ${client} 失敗 (${err.message})`);
             }
         }
 
-        if (!info || !info.streaming_data) {
-            throw new Error("どのデバイス（Android, TV, iOS, Web）でも動画データが見つかりませんでした。");
+        if (!info) {
+            throw new Error(lastError || "全デバイスで全滅しました");
         }
 
-        // 4. フォーマット選択
-        // ※ info は成功したデバイスのデータに置き換わっているので安心！
-        const format = info.chooseFormat({ type: 'video+audio', quality: 'best' });
-        
-        if (!format) {
-            throw new Error("適切な動画形式が見つかりませんでした。");
-        }
-
-        const directUrl = format.url;
-        console.log(`directUrl: ${directUrl}`);
-
-        // 5. レスポンス
+        // 3. レスポンス処理
         res.setHeader('Access-Control-Allow-Origin', '*');
+
+        if (resMode === 'j') {
+            return res.status(200).json(info);
+        }
+
+        const format = info.chooseFormat({ type: 'video+audio', quality: 'best' });
         res.status(200).json({
             success: true,
-            client: info.client_name, // どのデバイスで成功したか一応返す
+            client: info.client_name,
             title: info.basic_info.title,
-            url: directUrl
+            url: format ? format.url : null,
+            error: format ? null : "Streaming data found but no combined format available"
         });
 
     } catch (e) {
-        console.error("ERROR:", e.message);
-        res.status(500).json({ 
-            error: e.message, 
-            detail: "動画が非公開か、地域制限、あるいはボット対策に阻まれた可能性があります。" 
-        });
+        res.status(500).json({ error: e.message });
     }
 }
