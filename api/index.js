@@ -1,11 +1,11 @@
 import { Innertube, UniversalCache } from 'youtubei.js';
 
 export default async function handler(req, res) {
-    const { videoId, res: resMode, type } = req.query;
-    console.log(`videoId: ${videoId}, type: ${type}`); // パラメータをプリント！
+    const { videoId } = req.query;
+    console.log(`Target VideoID: ${videoId}`);
 
     if (!videoId) {
-        res.status(400).json({ error: "videoIdが足りないよ！" });
+        res.status(400).json({ error: "videoIdが必要だよ！" });
         return;
     }
 
@@ -15,63 +15,43 @@ export default async function handler(req, res) {
             generate_session_locally: true
         });
 
-        // 1. クライアントの優先順位を決定
-        const typeMap = {
-            'A': 'ANDROID',
-            'I': 'IOS',
-            'W': 'WEB',
-            'T': 'TV'
-        };
+        console.log("SYSTEM: YouTubeからストリームを吸い出し中...");
 
-        let clients = ['ANDROID', 'IOS', 'TV', 'WEB']; // デフォルトの順番
-        
-        // もし type が指定されていたら、その機種を先頭に持ってくる
-        if (type && typeMap[type.toUpperCase()]) {
-            const selected = typeMap[type.toUpperCase()];
-            clients = [selected, ...clients.filter(c => c !== selected)];
-            console.log(`ACTION: 指定された ${selected} を最優先でトライします！`);
-        }
-
-        let info = null;
-        let lastError = null;
-
-        // 2. 順番に試行
-        for (const client of clients) {
-            try {
-                const tempInfo = await yt.getInfo(videoId, client);
-                // ストリーミングデータがある、または res=j モードなら成功とみなす
-                if (tempInfo.streaming_data || resMode === 'j') {
-                    info = tempInfo;
-                    console.log(`SUCCESS: ${client} でデータ確保！`);
-                    break;
-                }
-            } catch (err) {
-                lastError = err.message;
-                console.log(`WARNING: ${client} 失敗 (${err.message})`);
-            }
-        }
-
-        if (!info) {
-            throw new Error(lastError || "全デバイスで全滅しました");
-        }
-
-        // 3. レスポンス処理
-        res.setHeader('Access-Control-Allow-Origin', '*');
-
-        if (resMode === 'j') {
-            return res.status(200).json(info);
-        }
-
-        const format = info.chooseFormat({ type: 'video+audio', quality: 'best' });
-        res.status(200).json({
-            success: true,
-            client: info.client_name,
-            title: info.basic_info.title,
-            url: format ? format.url : null,
-            error: format ? null : "Streaming data found but no combined format available"
+        // 1. 動画のストリームを取得（これがプロキシの核心！）
+        // youtubei.jsが内部で initplayback などを処理してくれます
+        const stream = await yt.download(videoId, {
+            type: 'video+audio',
+            quality: 'best',
+            format: 'mp4'
         });
 
+        // 2. レスポンスヘッダーの設定
+        // ブラウザに「これは動画ファイル（mp4）だよ」と教える
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        // 動画をダウンロードさせずにストリーミング再生させる設定
+        res.setHeader('Content-Disposition', 'inline');
+
+        // 3. データの「横流し」実行
+        // ReadableStreamをそのままレスポンスにパイプ(転送)します
+        const reader = stream.getReader();
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            // チャンク（データの破片）が届くたびに隊員へ送信
+            res.write(value);
+        }
+
+        console.log("SUCCESS: 全データの転送完了！");
+        res.end();
+
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error("ERROR:", e.message);
+        // エラー時はJSONで返す
+        if (!res.headersSent) {
+            res.status(500).json({ error: e.message });
+        }
     }
 }
